@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from schedulefree import AdamWScheduleFree
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from ..datasets import SPLIT_DIR, FFHQWrinkle, validate_splits
 from ..models import CSWinUNETR
@@ -55,10 +56,10 @@ def seed_worker(_):
 
 
 @torch.inference_mode()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, progress=False):
     model.eval()
     scores = []
-    for batch in loader:
+    for batch in tqdm(loader, desc="  validating", leave=False, disable=not progress, dynamic_ncols=True):
         prediction = model(batch["image"].to(device)).argmax(1)
         scores.extend(foreground_dice(prediction, batch["mask"].to(device)).cpu().tolist())
     return sum(scores) / len(scores)
@@ -102,6 +103,9 @@ def main():
         "--use-checkpoint",
         action="store_true",
         help="Recompute encoder activations to reduce training memory",
+    )
+    parser.add_argument(
+        "--no-progress", action="store_true", help="Hide the progress bars (e.g. for log files)"
     )
     args = parser.parse_args()
     if args.epochs < 1 or args.batch_size < 1 or args.workers < 0 or args.lr <= 0:
@@ -219,8 +223,11 @@ def main():
         "model_args": model_args,
     }
     (args.output_dir / "environment.json").write_text(json.dumps(environment, indent=2) + "\n")
+    progress = not args.no_progress
+    epoch_times = []  # durations of epochs run in this session, for the time estimate
     for epoch in range(start_epoch, args.epochs + 1):
         if stale >= args.patience:
+            print(f"Early stopping: no validation improvement in {stale} checks.", flush=True)
             break
         model.train()
         optimizer.train()
@@ -230,7 +237,15 @@ def main():
         epoch_start = time.perf_counter()
         timed_steps, timed_samples, compute_seconds = 0, 0, 0.0
         total_loss = 0.0
-        for batch_index, batch in enumerate(train_loader):
+        bar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch}/{args.epochs}",
+            unit="batch",
+            leave=False,
+            disable=not progress,
+            dynamic_ncols=True,
+        )
+        for batch_index, batch in enumerate(bar):
             # Exclude warmup batches from throughput measurements.
             timing = device.type == "cuda" and batch_index >= 5
             if timing:
@@ -262,6 +277,8 @@ def main():
                 timed_steps += 1
                 timed_samples += image.shape[0]
             total_loss += loss.item() * image.shape[0]
+            bar.set_postfix(loss=f"{loss.item():.4f}")
+        bar.close()
         train_seconds = time.perf_counter() - epoch_start
         row = {
             "epoch": epoch,
@@ -286,7 +303,7 @@ def main():
             )
         if epoch % args.eval_interval == 0 or epoch == args.epochs:
             validation_start = time.perf_counter()
-            row["val_dice"] = evaluate(ema, val_loader, device)
+            row["val_dice"] = evaluate(ema, val_loader, device, progress)
             row["validation_seconds"] = time.perf_counter() - validation_start
             if row["val_dice"] > best:
                 best, stale = row["val_dice"], 0
@@ -320,7 +337,20 @@ def main():
             },
             args.output_dir / "last.pt",
         )
-        print(json.dumps(row), flush=True)
+        epoch_times.append(row["epoch_seconds"])
+        recent = epoch_times[-10:]
+        per_epoch = sum(recent) / len(recent)
+        summary = (
+            f"Epoch {epoch}/{args.epochs} | loss {row['loss']:.4f} | "
+            f"{row['epoch_seconds'] / 60:.1f} min"
+        )
+        if "val_dice" in row:
+            summary += f" | val Dice {row['val_dice']:.4f} (best {best:.4f})"
+        summary += (
+            f" | at most {(args.epochs - epoch) * per_epoch / 3600:.1f} h left "
+            f"(early stopping after {args.patience - stale} more checks without improvement)"
+        )
+        print(summary if progress else json.dumps(row), flush=True)
 
 
 if __name__ == "__main__":
