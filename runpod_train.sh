@@ -42,9 +42,20 @@ EPOCHS=300
 
 drive_ok() { command -v rclone > /dev/null && rclone listremotes 2> /dev/null | grep -qx "$REMOTE:"; }
 upload_run() {
-    rclone copy "$RUN_DIR" "$REMOTE:$DRIVE_RUNS/$RUN_NAME" --exclude '*.tmp' && \
-        rclone copyto "$LOG" "$REMOTE:$DRIVE_RUNS/$RUN_NAME.log" && \
-        echo "[$(date '+%F %T')] copied $RUN_NAME to Drive: $DRIVE_RUNS/$RUN_NAME"
+    # Upload a frozen snapshot, not the live folder: train.py replaces last.pt every epoch, and a
+    # file that changes mid-upload fails rclone's checksum check. Hard links keep the old checkpoint
+    # intact because train.py writes a new file and renames it; small files are copied outright.
+    local snap="$WS/runs/.upload-$RUN_NAME" status=0
+    rm -rf "$snap"
+    cp -al "$RUN_DIR" "$snap" || return 1
+    find "$snap" -type f -name '*.tmp' -delete
+    find "$snap" -type f ! -name '*.pt' -exec sh -c 'cp "$1" "$1.copy" && mv "$1.copy" "$1"' _ {} \;
+    cp "$LOG" "$snap.log" 2> /dev/null || : > "$snap.log"
+    rclone copy "$snap" "$REMOTE:$DRIVE_RUNS/$RUN_NAME" && \
+        rclone copyto "$snap.log" "$REMOTE:$DRIVE_RUNS/$RUN_NAME.log" || status=1
+    rm -rf "$snap" "$snap.log"
+    [ "$status" = 0 ] && echo "[$(date '+%F %T')] copied $RUN_NAME to Drive: $DRIVE_RUNS/$RUN_NAME"
+    return "$status"
 }
 
 # Background worker: train, and copy the run folder to Drive while training and at the end.
