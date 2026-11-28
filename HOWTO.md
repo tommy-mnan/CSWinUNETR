@@ -319,7 +319,7 @@ tail -f runs/ffhq/metrics.jsonl
 | `--resume` | off | Continue from `output-dir/last.pt` |
 | `--no-progress` | off | Hide the progress bars and print one JSON line per epoch instead (useful for log files) |
 | `--deep-supervision` | off | Side-output heads after the four intermediate decoder blocks (1/16 to 1/2 resolution), each trained with Dice + CE; weights 1, 1/2, 1/4, ... normalised to 1. Training only: `best.pt` holds the baseline architecture |
-| `--srl-weight` | 0 | Skeleton recall loss weight (0 = off, official default 1). Skeleton = skimage skeleton of the mask, 2 px tube, clipped to the mask |
+| `--srl-weight` | 0 | Skeleton recall loss weight (0 = off). Use 0.5: `dice_ce_loss` is 0.5 Dice + 0.5 CE, so 0.5 matches the official Dice : CE : skeleton recall = 1 : 1 : 1 (the presets in `runpod_train.sh` use 0.5). Skeleton = skimage skeleton of the mask, 2 px tube, clipped to the mask |
 | `--srl-scales` | final | `final`: skeleton recall on the full-resolution output only; `all`: on every deep-supervision level (needs `--deep-supervision`) |
 | `--target-downsample` | maxpool | How mask and skeleton targets are downsampled for deep-supervision levels: `maxpool` keeps 1-2 px wrinkles, `nearest` is nnU-Net's behaviour (ablation) |
 | `--no-skeleton-tube` | off | Use the bare 1 px skeleton instead of the 2 px tube |

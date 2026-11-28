@@ -102,7 +102,7 @@ def main():
         "--srl-weight",
         type=float,
         default=0.0,
-        help="Weight of the skeleton recall loss (0 = off; the official default is 1)",
+        help="Weight of the skeleton recall loss (0 = off). 0.5 reproduces the official 1:1:1 weighting of Dice, CE and skeleton recall, because dice_ce_loss averages Dice and CE (0.5 each)",
     )
     parser.add_argument(
         "--srl-scales",

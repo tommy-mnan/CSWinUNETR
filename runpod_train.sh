@@ -28,13 +28,15 @@ DATA=$WS/data
 SEED=${SEED:-42}
 CONFIG=${CONFIG:-baseline}
 # The study's configurations. All other settings are identical (see below).
+# --srl-weight 0.5 matches the official Dice : CE : skeleton recall = 1 : 1 : 1, because the
+# project's Dice+CE loss is 0.5 * Dice + 0.5 * CE.
 case "$CONFIG" in
     baseline)         CONFIG_ARGS=() ;;                                   # Dice + CE
     ds)               CONFIG_ARGS=(--deep-supervision) ;;                 # + deep supervision
-    srl)              CONFIG_ARGS=(--srl-weight 1) ;;                     # + skeleton recall (final output)
-    ds-srl)           CONFIG_ARGS=(--deep-supervision --srl-weight 1) ;;  # + both, SRL on the final output
-    ds-mssrl)         CONFIG_ARGS=(--deep-supervision --srl-weight 1 --srl-scales all) ;;  # multi-scale SRL, max-pooled targets
-    ds-mssrl-nearest) CONFIG_ARGS=(--deep-supervision --srl-weight 1 --srl-scales all --target-downsample nearest) ;;  # ablation
+    srl)              CONFIG_ARGS=(--srl-weight 0.5) ;;                     # + skeleton recall (final output)
+    ds-srl)           CONFIG_ARGS=(--deep-supervision --srl-weight 0.5) ;;  # + both, SRL on the final output
+    ds-mssrl)         CONFIG_ARGS=(--deep-supervision --srl-weight 0.5 --srl-scales all) ;;  # multi-scale SRL, max-pooled targets
+    ds-mssrl-nearest) CONFIG_ARGS=(--deep-supervision --srl-weight 0.5 --srl-scales all --target-downsample nearest) ;;  # ablation
     *) echo "Unknown CONFIG '$CONFIG' (baseline, ds, srl, ds-srl, ds-mssrl, ds-mssrl-nearest)"; exit 1 ;;
 esac
 RUN_NAME=${RUN_NAME:-$CONFIG-s$SEED}
