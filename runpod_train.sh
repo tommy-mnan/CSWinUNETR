@@ -13,6 +13,10 @@
 # Other config: CONFIG=ds-mssrl SEED=43 bash runpod_train.sh   (configs listed below; run folder <config>-s<seed>)
 # SRL pilots:   CONFIG=ds-mssrl SRL_WEIGHT=0.05 bash runpod_train.sh    (run folder ds-mssrl-w0.05-s42)
 #               CONFIG=ds-mssrl NO_TUBE=1 bash runpod_train.sh          (bare 1 px skeleton; folder ds-mssrl-bare-s42)
+# Pilot queue (one after another, in the background; survives closing the browser):
+#   nohup bash -c 'for w in 0.05 0.15; do CONFIG=ds-mssrl SRL_WEIGHT=$w STOP_EPOCH=30 FOREGROUND=1 \
+#       bash /workspace/CSWinUNETR/runpod_train.sh; done' > /workspace/runs/pilots.log 2>&1 &
+#   (FOREGROUND=1 makes the script wait until that run has finished and been copied to Drive.)
 # Benchmark:    BENCHMARK=1 bash runpod_train.sh   (trains 1 epoch into a test folder, then stops)
 #
 # Connecting Google Drive (once per pod):
@@ -63,6 +67,9 @@ SYNC_MINUTES=${SYNC_MINUTES:-30}
 BATCH_SIZE=2
 WORKERS=8
 EPOCHS=300
+# Pilots: STOP_EPOCH=30 stops the run after epoch 30. Rerunning without it resumes the same run to
+# $EPOCHS (the schedule-free optimiser has no epoch-dependent schedule, so nothing is lost).
+STOP_EPOCH=${STOP_EPOCH:-$EPOCHS}
 
 drive_ok() { command -v rclone > /dev/null && rclone listremotes 2> /dev/null | grep -qx "$REMOTE:"; }
 upload_run() {
@@ -177,9 +184,17 @@ elif [ -d "$RUN_DIR" ] && [ -n "$(ls -A "$RUN_DIR")" ]; then
     echo "$RUN_DIR has files but no last.pt (the first epoch never finished). Delete it and rerun."
     exit 1
 fi
-nohup bash "$REPO/runpod_train.sh" __worker "${ARGS[@]}" --output-dir "$RUN_DIR" --epochs "$EPOCHS" \
+if [ "${FOREGROUND:-0}" = 1 ]; then
+    echo "Training until epoch $STOP_EPOCH (log: $LOG) ..."
+    status=0
+    bash "$REPO/runpod_train.sh" __worker "${ARGS[@]}" --output-dir "$RUN_DIR" --epochs "$STOP_EPOCH" \
+        --no-progress >> "$LOG" 2>&1 || status=$?
+    echo "[$(date '+%F %T')] $RUN_NAME finished (status $status)"
+    exit "$status"
+fi
+nohup bash "$REPO/runpod_train.sh" __worker "${ARGS[@]}" --output-dir "$RUN_DIR" --epochs "$STOP_EPOCH" \
     --no-progress >> "$LOG" 2>&1 &
-echo "Training started in the background (PID $!). It keeps running if you close the browser."
+echo "Training started in the background (PID $!), until epoch $STOP_EPOCH. It keeps running if you close the browser."
 drive_ok && echo "  The run folder is copied to Drive ($DRIVE_RUNS/$RUN_NAME) every $SYNC_MINUTES min and at the end."
 echo "  Progress:  tail -f $LOG      (one line per finished epoch; Ctrl+C stops watching, not training)"
 echo "  GPU:       nvidia-smi"
