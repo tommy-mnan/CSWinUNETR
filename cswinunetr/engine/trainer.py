@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from ..datasets import SPLIT_DIR, FFHQWrinkle, validate_splits
 from ..models import CSWinUNETR
-from ..utils.losses import dice_ce_loss
+from ..utils.losses import training_loss
 from ..utils.metrics import foreground_dice
 
 
@@ -93,6 +93,34 @@ def main():
         help="SDSConv flags for encoder stages 1-4 (0=off, 1=on)",
     )
     parser.add_argument("--sds-kernel-sizes", type=int, nargs=4, default=[11, 9, 7, 5])
+    parser.add_argument(
+        "--deep-supervision",
+        action="store_true",
+        help="Supervise side outputs of the four intermediate decoder blocks (training only)",
+    )
+    parser.add_argument(
+        "--srl-weight",
+        type=float,
+        default=0.0,
+        help="Weight of the skeleton recall loss (0 = off; the official default is 1)",
+    )
+    parser.add_argument(
+        "--srl-scales",
+        choices=("final", "all"),
+        default="final",
+        help="Apply skeleton recall to the final output only, or to every deep-supervision level",
+    )
+    parser.add_argument(
+        "--target-downsample",
+        choices=("maxpool", "nearest"),
+        default="maxpool",
+        help="How mask and skeleton targets are downsampled for deep-supervision levels",
+    )
+    parser.add_argument(
+        "--no-skeleton-tube",
+        action="store_true",
+        help="Use the bare 1 px skeleton instead of the official 2 px tube",
+    )
     parser.add_argument("--eval-interval", type=int, default=5)
     parser.add_argument(
         "--patience", type=int, default=30, help="Validation checks without improvement"
@@ -112,6 +140,10 @@ def main():
         parser.error("epochs, batch-size and lr must be positive; workers must be nonnegative")
     if args.eval_interval < 1 or args.patience < 1:
         parser.error("eval-interval and patience must be positive")
+    if args.srl_weight < 0:
+        parser.error("srl-weight must be nonnegative")
+    if args.srl_scales == "all" and not args.deep_supervision:
+        parser.error("--srl-scales all requires --deep-supervision")
     if args.resume and not (args.output_dir / "last.pt").is_file():
         parser.error("resume requires output-dir/last.pt")
     if not args.resume and args.output_dir.exists() and any(args.output_dir.iterdir()):
@@ -120,7 +152,15 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     counts = validate_splits(args.split_dir)
-    train = FFHQWrinkle(args.data_root, "train", args.split_dir, args.image_size)
+    use_srl = args.srl_weight > 0
+    train = FFHQWrinkle(
+        args.data_root,
+        "train",
+        args.split_dir,
+        args.image_size,
+        skeleton=use_srl,
+        tube=not args.no_skeleton_tube,
+    )
     val = FFHQWrinkle(args.data_root, "val", args.split_dir, args.image_size)
     loader_args = {
         "num_workers": args.workers,
@@ -155,7 +195,11 @@ def main():
         "strip_kernel_sizes": args.strip_kernel_sizes,
         "mlp_ratio": args.mlp_ratio,
         "drop_path_rate": args.drop_path_rate,
+        "deep_supervision": args.deep_supervision,
     }
+    # best.pt holds the test-time network: the same architecture as the baseline, since
+    # side-output heads only add training losses.
+    eval_model_args = {**model_args, "deep_supervision": False}
     model = CSWinUNETR(**model_args, use_checkpoint=args.use_checkpoint).to(device)
     optimizer = AdamWScheduleFree(model.parameters(), lr=args.lr, weight_decay=0.05)
     # EMA tracks training weights, separately from schedule-free evaluation weights.
@@ -195,6 +239,11 @@ def main():
             "eval_interval",
             "patience",
             "data_root",
+            "deep_supervision",
+            "srl_weight",
+            "srl_scales",
+            "target_downsample",
+            "no_skeleton_tube",
         ):
             if settings[key] != saved["settings"].get(key, parser.get_default(key)):
                 parser.error(f"Cannot resume with a different {key}")
@@ -221,6 +270,9 @@ def main():
         "parameters": sum(p.numel() for p in model.parameters()),
         "precision": "float32",
         "model_args": model_args,
+        "test_time_parameters": sum(
+            p.numel() for name, p in model.named_parameters() if not name.startswith("side_outputs.")
+        ),
     }
     (args.output_dir / "environment.json").write_text(json.dumps(environment, indent=2) + "\n")
     progress = not args.no_progress
@@ -256,7 +308,15 @@ def main():
                 begin.record()
             image, target = batch["image"].to(device), batch["mask"].to(device)
             optimizer.zero_grad(set_to_none=True)
-            loss = dice_ce_loss(model(image), target)
+            skeleton = batch["skeleton"].to(device) if use_srl else None
+            loss = training_loss(
+                model(image),
+                target,
+                skeleton,
+                srl_weight=args.srl_weight,
+                srl_scales=args.srl_scales,
+                downsample=args.target_downsample,
+            )
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"Non-finite training loss at epoch {epoch}")
             loss.backward()
@@ -309,10 +369,14 @@ def main():
                 best, stale = row["val_dice"], 0
                 save_checkpoint(
                     {
-                        "model": ema.state_dict(),
+                        "model": {
+                            name: value
+                            for name, value in ema.state_dict().items()
+                            if not name.startswith("side_outputs.")
+                        },
                         "epoch": epoch,
                         "val_dice": best,
-                        "model_args": model_args,
+                        "model_args": eval_model_args,
                         "settings": settings,
                     },
                     args.output_dir / "best.pt",

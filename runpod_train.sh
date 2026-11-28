@@ -10,6 +10,7 @@
 #
 # Rerun the same command any time: it resumes from last.pt (from /workspace, or from Drive on a new pod).
 # Other seed:   SEED=43 bash runpod_train.sh
+# Other config: CONFIG=ds-mssrl SEED=43 bash runpod_train.sh   (configs listed below; run folder <config>-s<seed>)
 # Benchmark:    BENCHMARK=1 bash runpod_train.sh   (trains 1 epoch into a test folder, then stops)
 #
 # Connecting Google Drive (once per pod):
@@ -25,7 +26,18 @@ WS=${WS:-/workspace}
 REPO=$WS/CSWinUNETR
 DATA=$WS/data
 SEED=${SEED:-42}
-RUN_NAME=${RUN_NAME:-baseline-s$SEED}
+CONFIG=${CONFIG:-baseline}
+# The study's configurations. All other settings are identical (see below).
+case "$CONFIG" in
+    baseline)         CONFIG_ARGS=() ;;                                   # Dice + CE
+    ds)               CONFIG_ARGS=(--deep-supervision) ;;                 # + deep supervision
+    srl)              CONFIG_ARGS=(--srl-weight 1) ;;                     # + skeleton recall (final output)
+    ds-srl)           CONFIG_ARGS=(--deep-supervision --srl-weight 1) ;;  # + both, SRL on the final output
+    ds-mssrl)         CONFIG_ARGS=(--deep-supervision --srl-weight 1 --srl-scales all) ;;  # multi-scale SRL, max-pooled targets
+    ds-mssrl-nearest) CONFIG_ARGS=(--deep-supervision --srl-weight 1 --srl-scales all --target-downsample nearest) ;;  # ablation
+    *) echo "Unknown CONFIG '$CONFIG' (baseline, ds, srl, ds-srl, ds-mssrl, ds-mssrl-nearest)"; exit 1 ;;
+esac
+RUN_NAME=${RUN_NAME:-$CONFIG-s$SEED}
 RUN_DIR=$WS/runs/$RUN_NAME
 LOG=$WS/runs/$RUN_NAME.log   # outside RUN_DIR: train.py refuses to start a new run in a non-empty folder
 
@@ -124,17 +136,17 @@ done
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 ARGS=(--data-root "$DATA" --device cuda --batch-size "$BATCH_SIZE" --workers "$WORKERS"
-      --use-checkpoint --seed "$SEED")
+      --use-checkpoint --seed "$SEED" ${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"})
 
 if [ "${BENCHMARK:-0}" = 1 ]; then
-    echo "== 4/4 Benchmark: 1 epoch into $WS/runs/benchmark"
+    echo "== 4/4 Benchmark ($CONFIG): 1 epoch into $WS/runs/benchmark"
     rm -rf "$WS/runs/benchmark"
     python cswinunetr/train.py "${ARGS[@]}" --output-dir "$WS/runs/benchmark" --epochs 1
     python -c "import json; r=json.loads(open('$WS/runs/benchmark/metrics.jsonl').readline()); print('Epoch time:', round(r['epoch_seconds']), 's =', round(r['epoch_seconds']/60, 1), 'min ->', round(r['epoch_seconds']*$EPOCHS/3600, 1), 'h for $EPOCHS epochs')"
     exit 0
 fi
 
-echo "== 4/4 Train: $RUN_DIR"
+echo "== 4/4 Train ($CONFIG): $RUN_DIR"
 if pgrep -f "train.py.*--output-dir $RUN_DIR( |$)" > /dev/null; then
     echo "Already training into $RUN_DIR. Watch it with: tail -f $LOG"
     exit 0

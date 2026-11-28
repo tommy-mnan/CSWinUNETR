@@ -10,6 +10,22 @@ from torch.utils.data import Dataset
 SPLIT_DIR = Path(__file__).parent / "splits" / "ffhq"
 
 
+def tubed_skeleton(mask: np.ndarray, tube: bool = True) -> np.ndarray:
+    """Skeleton target for skeleton recall, as in the official SkeletonTransform.
+
+    skimage skeletonize of the binary mask; with `tube`, dilated by a cross iterated twice
+    (a 2 px tube) and then multiplied by the mask, so the tube never leaves the wrinkle.
+    """
+    from scipy import ndimage
+    from skimage.morphology import skeletonize
+
+    skeleton = skeletonize(mask > 0)
+    if tube:
+        footprint = ndimage.iterate_structure(ndimage.generate_binary_structure(2, 1), 2)
+        skeleton = ndimage.binary_dilation(skeleton, structure=footprint)
+    return (skeleton * mask).astype(mask.dtype)
+
+
 def read_ids(path: str | Path) -> list[str]:
     ids = [Path(line.strip()).stem for line in Path(path).read_text().splitlines() if line.strip()]
     if not ids or len(ids) != len(set(ids)):
@@ -105,7 +121,9 @@ class FFHQWrinkle(Dataset):
     Only the training split is augmented.
     """
 
-    def __init__(self, root, split="train", split_dir=SPLIT_DIR, image_size=1024):
+    def __init__(
+        self, root, split="train", split_dir=SPLIT_DIR, image_size=1024, skeleton=False, tube=True
+    ):
         if split not in ("train", "val", "test"):
             raise ValueError("split must be train, val or test")
         if image_size < 64 or image_size % 32:
@@ -113,6 +131,7 @@ class FFHQWrinkle(Dataset):
         self.ids = read_ids(Path(split_dir) / f"{split}.txt")
         self.image_size = image_size
         self.training = split == "train"
+        self.skeleton, self.tube = skeleton, tube
         root = Path(root)
         self.images = index_pngs(root / "masked_face_images")
         self.textures = index_pngs(root / "weak_wrinkle_masks")
@@ -145,11 +164,15 @@ class FFHQWrinkle(Dataset):
             transformed = self.spatial(image=rgb, masks=[mask, texture])
             rgb = self.color(image=transformed["image"])["image"]
             mask, texture = transformed["masks"]
-        return {
+        item = {
             "id": case,
             "image": input_tensor(rgb, texture),
             "mask": torch.from_numpy(mask.copy()).long(),
         }
+        if self.skeleton:
+            # Computed after augmentation so the skeleton matches the transformed mask.
+            item["skeleton"] = torch.from_numpy(tubed_skeleton(mask, self.tube)).long()
+        return item
 
 
 def validate_splits(split_dir=SPLIT_DIR):

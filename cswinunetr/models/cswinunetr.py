@@ -95,9 +95,14 @@ class CSWinUNETR(nn.Module):
         strip_kernel_sizes: Axial depthwise kernel lengths per stage.
         mlp_ratio: Transformer MLP hidden width relative to stage channels.
         drop_path_rate: Maximum stochastic-depth probability.
+        deep_supervision: Add a 1x1 side-output head after each of the four
+            intermediate decoder blocks (1/16, 1/8, 1/4 and 1/2 resolution). The
+            heads are used only in training mode; evaluation returns the final output.
 
     Inputs are NCHW or NCDHW; each spatial dimension must be a multiple of 32
-    and at least 64. Outputs are unnormalized logits at the input resolution.
+    and at least 64. Outputs are unnormalized logits at the input resolution. In
+    training mode with deep_supervision, the output is a list of logits ordered from
+    full resolution to the coarsest side output.
     """
 
     def __init__(
@@ -117,6 +122,7 @@ class CSWinUNETR(nn.Module):
         strip_kernel_sizes=(9, 7, 5, 3),
         mlp_ratio=4.0,
         drop_path_rate=0.2,
+        deep_supervision=False,
     ):
         super().__init__()
         if spatial_dims not in (2, 3):
@@ -208,6 +214,15 @@ class CSWinUNETR(nn.Module):
             ]
         )
         self.output = UnetOutBlock(spatial_dims, feature_size, out_channels)
+        self.deep_supervision = bool(deep_supervision)
+        # One head per intermediate decoder block, coarse to fine (1/16 ... 1/2).
+        self.side_outputs = (
+            nn.ModuleList(
+                [UnetOutBlock(spatial_dims, c, out_channels) for c in decoder_channels[1:-1]]
+            )
+            if self.deep_supervision
+            else None
+        )
 
     @staticmethod
     def _initialize_encoder(module):
@@ -254,6 +269,12 @@ class CSWinUNETR(nn.Module):
             + [features[3]]
         )
         current = self.bottleneck(features[4])
-        for upsample, skip in zip(self.decoder, reversed(skips)):
+        side = self.deep_supervision and self.training
+        side_logits = []
+        for index, (upsample, skip) in enumerate(zip(self.decoder, reversed(skips))):
             current = upsample(current, skip)
-        return self.output(current)
+            if side and index < len(self.side_outputs):
+                side_logits.append(self.side_outputs[index](current))
+        if not side:
+            return self.output(current)
+        return [self.output(current), *reversed(side_logits)]
