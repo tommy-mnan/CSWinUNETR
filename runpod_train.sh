@@ -11,6 +11,8 @@
 # Rerun the same command any time: it resumes from last.pt (from /workspace, or from Drive on a new pod).
 # Other seed:   SEED=43 bash runpod_train.sh
 # Other config: CONFIG=ds-mssrl SEED=43 bash runpod_train.sh   (configs listed below; run folder <config>-s<seed>)
+# SRL pilots:   CONFIG=ds-mssrl SRL_WEIGHT=0.05 bash runpod_train.sh    (run folder ds-mssrl-w0.05-s42)
+#               CONFIG=ds-mssrl NO_TUBE=1 bash runpod_train.sh          (bare 1 px skeleton; folder ds-mssrl-bare-s42)
 # Benchmark:    BENCHMARK=1 bash runpod_train.sh   (trains 1 epoch into a test folder, then stops)
 #
 # Connecting Google Drive (once per pod):
@@ -27,19 +29,27 @@ REPO=$WS/CSWinUNETR
 DATA=$WS/data
 SEED=${SEED:-42}
 CONFIG=${CONFIG:-baseline}
+# Skeleton recall weight for the srl configs. 0.5 matches the official Dice : CE : skeleton recall
+# = 1 : 1 : 1 (paper w = 1.0), because the project's Dice+CE loss is 0.5 * Dice + 0.5 * CE;
+# 0.05 corresponds to the paper's other value, w = 0.1.
+SRL_WEIGHT=${SRL_WEIGHT:-0.5}
+NO_TUBE=${NO_TUBE:-0}   # 1 = bare 1 px skeleton instead of the official 2 px tube
 # The study's configurations. All other settings are identical (see below).
-# --srl-weight 0.5 matches the official Dice : CE : skeleton recall = 1 : 1 : 1, because the
-# project's Dice+CE loss is 0.5 * Dice + 0.5 * CE.
 case "$CONFIG" in
     baseline)         CONFIG_ARGS=() ;;                                   # Dice + CE
     ds)               CONFIG_ARGS=(--deep-supervision) ;;                 # + deep supervision
-    srl)              CONFIG_ARGS=(--srl-weight 0.5) ;;                     # + skeleton recall (final output)
-    ds-srl)           CONFIG_ARGS=(--deep-supervision --srl-weight 0.5) ;;  # + both, SRL on the final output
-    ds-mssrl)         CONFIG_ARGS=(--deep-supervision --srl-weight 0.5 --srl-scales all) ;;  # multi-scale SRL, max-pooled targets
-    ds-mssrl-nearest) CONFIG_ARGS=(--deep-supervision --srl-weight 0.5 --srl-scales all --target-downsample nearest) ;;  # ablation
+    srl)              CONFIG_ARGS=(--srl-weight "$SRL_WEIGHT") ;;                     # + skeleton recall (final output)
+    ds-srl)           CONFIG_ARGS=(--deep-supervision --srl-weight "$SRL_WEIGHT") ;;  # + both, SRL on the final output
+    ds-mssrl)         CONFIG_ARGS=(--deep-supervision --srl-weight "$SRL_WEIGHT" --srl-scales all) ;;  # multi-scale SRL, max-pooled targets
+    ds-mssrl-nearest) CONFIG_ARGS=(--deep-supervision --srl-weight "$SRL_WEIGHT" --srl-scales all --target-downsample nearest) ;;  # ablation
     *) echo "Unknown CONFIG '$CONFIG' (baseline, ds, srl, ds-srl, ds-mssrl, ds-mssrl-nearest)"; exit 1 ;;
 esac
-RUN_NAME=${RUN_NAME:-$CONFIG-s$SEED}
+SUFFIX=""
+if [[ " ${CONFIG_ARGS[*]-} " == *" --srl-weight "* ]]; then
+    [ "$SRL_WEIGHT" != 0.5 ] && SUFFIX="$SUFFIX-w$SRL_WEIGHT"
+    [ "$NO_TUBE" = 1 ] && { CONFIG_ARGS+=(--no-skeleton-tube); SUFFIX="$SUFFIX-bare"; }
+fi
+RUN_NAME=${RUN_NAME:-$CONFIG$SUFFIX-s$SEED}
 RUN_DIR=$WS/runs/$RUN_NAME
 LOG=$WS/runs/$RUN_NAME.log   # outside RUN_DIR: train.py refuses to start a new run in a non-empty folder
 
